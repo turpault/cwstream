@@ -7,6 +7,7 @@ const logGroupName='useast1-logs01.dev.fusion.autodesk.com';
 
 var cloudwatchlogs = new AWS.CloudWatchLogs({apiVersion: '2014-03-28'});
 let logstreams = [];
+let emptyStreams = [];
 const streamsToken = {};
 
 const startTime = new Date().getTime() - parseInt(process.argv[2] || 3600)*1000;
@@ -30,10 +31,17 @@ function enumerateLogStreams(cb) {
         overlap = true;
       }
       streams = _.without(streams, logstreams);
-      // delete everything not fzc
-      async.each(streams.filter(s => s.indexOf('fzc')!==0), (logStreamName, cb) => cloudwatchlogs.deleteLogStream({logStreamName, logGroupName}, ()=>{console.info('Deleted',logStreamName); cb();} ), nop);
-      async.filter(streams, deleteStreamIfEmpty, (err, streams) => {
-        logstreams = logstreams.concat(streams);
+
+      async.each(streams, (stream, cb) =>
+        isStreamIfEmpty(stream, (err, empty) => {
+          if (empty) {
+            emptyStreams.push(stream);
+          } else {
+            logstreams.push(stream);
+          }
+          cb();
+        }),
+      () => {
         params.nextToken = data.nextToken;
         cb(err);
       });
@@ -41,6 +49,20 @@ function enumerateLogStreams(cb) {
   cb);
 }
 
+
+
+function isStreamIfEmpty(logStreamName, cb) {
+  var params = {
+      logGroupName,
+      logStreamName,
+      startTime: 0,
+      limit: 1,
+      startFromHead: true
+  };
+  cloudwatchlogs.getLogEvents(params, (err, data) => {
+    cb(err, data && data.events && data.events.length === 0);
+  });
+}
 
 function deleteStreamIfEmpty(logStreamName, cb) {
   var params = {
@@ -66,7 +88,7 @@ function deleteStreamIfEmpty(logStreamName, cb) {
 function scanStreams(cb) {
   cb = cb || nop;
   async.each(logstreams, (logStreamName, cb) => {
-    const nextToken = streamsToken[logStreamName];
+    let nextToken = streamsToken[logStreamName];
     var params = {
         logGroupName,
         logStreamName,
@@ -79,14 +101,16 @@ function scanStreams(cb) {
       cloudwatchlogs.getLogEvents(params, function(err, data) {
         nextToken = token;
         if(err) return cb(err);
-        _.each(data.events, e=>console.info(logStreamName, new Date(e).toISOString(), e.message));
+        _.each(data.events, e=>console.info(logStreamName, new Date().toISOString(), e.message));
         streamsToken[logStreamName] = token = data.nextForwardToken;
         cb();
       });
     });
   }, cb);
 }
+console.info('Scanning streams to monitor');
 enumerateLogStreams(err => {
+  async.each(emptyStreams, deleteStreamIfEmpty, nop);
   setInterval(scanStreams, 10000);
   scanStreams();
   const redo = (err) => enumerateLogStreams(redo);
